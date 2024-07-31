@@ -1,0 +1,136 @@
+---
+title: "Prepare data"
+format: html
+editor: visual
+---
+
+# some settings
+```{r}
+setwd("/Users/chenjialiang/Desktop/MSc AI for Medicine&Medical Research/MEIN40330-AI for Personalized Medicine/Final project")
+
+set.seed(1)
+```
+
+# libraries
+```{r}
+#BiocManager::install("org.Hs.eg.db")
+library(cmapR)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(stringi)
+library(caTools)
+library(randomForest)
+library(openxlsx)
+```
+
+# read cell line expression data
+```{r}
+#gct_data <- parse_gctx("CCLE_RNAseq_genes_rpkm_20180929.gct")
+#data_mrna <- as.data.frame(gct_data@mat)
+data_mrna <- read.table("CCLE_RNAseq_rsem_genes_tpm_20180929.txt", header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+```
+
+```{r}
+# map gene id with gene name
+data_mrna$gene <- mapIds(org.Hs.eg.db, keys = substr(data_mrna$gene_id,1,15), keytype = "ENSEMBL", column = "SYMBOL")
+
+# remove genes with no gene name
+data_mrna <- data_mrna[!is.na(data_mrna$gene),]
+
+# replace NA values with 0
+data_mrna[is.na(data_mrna)] <- 0
+
+# replace negative values with 0
+data_mrna[data_mrna<0] <- 0
+
+# keep only skin cancer cell line
+data_mrna <- select(data_mrna, contains("SKIN"), gene)
+
+# check if duplicated gene name
+arrange(data_mrna[duplicated(data_mrna$gene),], gene)
+
+# remove duplicated gene
+data_mrna <- data_mrna[!duplicated(data_mrna$gene),]
+
+# set gene name as index
+rownames(data_mrna) <- data_mrna$gene
+data_mrna <- select(data_mrna, -gene)
+
+# remove col if all values are 0
+data_mrna <- data_mrna[rowSums(data_mrna)!=0,]
+
+# transpose
+data_mrna <- t(data_mrna)
+
+# normalize data
+data_mrna <- apply(data_mrna, 2, function(x) x / mean(x))
+data_mrna <- rownames_to_column(as.data.frame(data_mrna), var = "cell_line")
+```
+
+# read ic50 data - ic50 is actually ln(ic50)
+```{r}
+data_ic50_1 <- read.table("SKCM_IC_Mon Jul 29 21_32_39 2024.csv", header = TRUE, stringsAsFactors = FALSE, sep = ",")
+
+data_ic50_1['GDSC1'] <- 'Y'
+
+data_ic50_2 <- read.table("SKCM_IC_Mon Jul 29 12_10_09 2024.csv", header = TRUE, stringsAsFactors = FALSE, sep = ",")
+
+data_ic50_2['GDSC2'] <- 'Y'
+
+data_ic50_1 <- data_ic50_1 |>
+  select(Drug.Name, Drug.ID, Cell.Line.Name, IC50, GDSC1) |>
+  mutate(cell_line = paste0(str_replace_all(Cell.Line.Name, "-", ""), "_SKIN")) |>
+  mutate(IC50_1=IC50) |>
+  select(-Cell.Line.Name,-IC50) 
+
+data_ic50_2 <- data_ic50_2 |>
+  select(Drug.Name, Drug.ID, Cell.Line.Name, IC50, GDSC2) |>
+  mutate(cell_line = paste0(str_replace_all(Cell.Line.Name, "-", ""), "_SKIN")) |>
+  mutate(IC50_2=IC50) |>
+  select(-Cell.Line.Name,-IC50)
+
+data_ic50 <- merge(data_ic50_1, data_ic50_2, by = c("Drug.Name","Drug.ID","cell_line"), all = TRUE)
+
+data_ic50 <- data_ic50 |>
+  mutate(IC50=if_else(is.na(GDSC2), IC50_1, IC50_2)) |>
+  select(-IC50_1, -IC50_2, -GDSC1, -GDSC2)
+```
+
+# export two datasets
+```{r}
+write.csv(data_mrna, "expression_data.csv")
+write.csv(data_ic50, "ic50_data.csv")
+```
+
+# ------- code below is not in use -------
+
+# merge two datasets
+```{r}
+data <- merge(data_mrna, data_ic50, by = "cell_line")
+write.csv(data, "data_combined_melanoma.csv")
+```
+
+# build predictor
+```{r}
+# choose drug
+drug <- "Dacarbazine"
+data_input <- data[data$Drug.Name == drug,]
+
+# train test split
+split <- sample.split(data_input$IC50, SplitRatio = 0.7)
+train <- as.data.frame(subset(data_input, split == TRUE))
+test <- as.data.frame(subset(data_input, split == FALSE))
+
+col_remove <- c("cell_line", "Drug.Name", "IC50")
+
+x_train <- train[,!names(train) %in% col_remove]
+y_train <- train$IC50
+
+x_test <- test[,!names(test) %in% col_remove]
+y_test <- test$IC50
+
+# train model
+rf <- randomForest(IC50 ~ ., data = train, importance = TRUE)
+
+```
+
